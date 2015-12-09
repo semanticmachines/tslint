@@ -14,7 +14,8 @@ module.exports = function (grunt) {
 
         clean: {
             core: ["lib/**/*.js", "lib/**/*.d.ts"],
-            test: ["build/"]
+            test: ["build/"],
+            docs: ["docs/*.js"]
         },
 
         mochaTest: {
@@ -33,7 +34,12 @@ module.exports = function (grunt) {
             },
             testRules: {
                 args: ["./build/test/ruleTestRunner.js"]
-            }
+            },
+            docs: {
+                cmd: "node",
+                args: ["buildDocs.js"],
+                options: {cwd: "./docs"},
+            },
         },
 
         jscs: {
@@ -58,12 +64,18 @@ module.exports = function (grunt) {
                 "test/**/*.ts",
                 "!test/**/*.test.ts",
                 "!test/typings/**/*.ts"
+            ],
+            docs: [
+                "docs/**/*.ts"
             ]
         },
 
         ts: {
             core: {
                 tsconfig: "src/tsconfig.json"
+            },
+            docs: {
+                tsconfig: "docs/tsconfig.json"
             },
             test: {
                 tsconfig: "test/tsconfig.json"
@@ -73,6 +85,7 @@ module.exports = function (grunt) {
 
     // load NPM tasks
     grunt.loadNpmTasks("grunt-contrib-clean");
+    grunt.loadNpmTasks("grunt-exec");
     grunt.loadNpmTasks("grunt-jscs");
     grunt.loadNpmTasks("grunt-mocha-test");
     grunt.loadNpmTasks("grunt-run");
@@ -92,6 +105,12 @@ module.exports = function (grunt) {
         "mochaTest",
         "run:testRules",
     ].concat(checkBinTest));
+    grunt.registerTask("docs", [
+        "clean:docs",
+        "ts:docs",
+        "tslint:docs",
+        "run:docs"
+    ]);
 
     // create default task
     grunt.registerTask("default", ["jscs", "core", "test"]);
