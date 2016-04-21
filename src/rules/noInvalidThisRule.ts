@@ -19,6 +19,18 @@ import * as ts from "typescript";
 import * as Lint from "../lint";
 
 export class Rule extends Lint.Rules.AbstractRule {
+    /* tslint:disable:object-literal-sort-keys */
+    public static metadata: Lint.IRuleMetadata = {
+        ruleName: "no-invalid-this",
+        description: "Disallows using the `this` keyword outside of classes.",
+        rationale: "See [the rule's author's rationale here.](https://github.com/palantir/tslint/pull/1105#issue-147549402)",
+        optionsDescription: "Not configurable.",
+        options: {},
+        optionExamples: ["true"],
+        type: "functionality",
+    };
+    /* tslint:enable:object-literal-sort-keys */
+
     public static FAILURE_STRING = "the \"this\" keyword is disallowed outside of a class body" ;
 
     public apply(sourceFile: ts.SourceFile): Lint.RuleFailure[] {
