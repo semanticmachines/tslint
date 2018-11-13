@@ -40,9 +40,9 @@ export class Rule extends Lint.Rules.AbstractRule {
             - Import sources must be alphabetized within groups, i.e.:
                     import * as foo from "a";
                     import * as bar from "b";
-            - Groups of imports are delineated by blank lines. You can use these to group imports
-                however you like, e.g. by first- vs. third-party or thematically or can you can
-                enforce a grouping of third-party, parent directories and the current directory.`,
+            - Groups of imports are delineated by blank lines. You can use this rule to group
+                imports however you like, e.g. by first- vs. third-party or thematically or
+                you can define groups based upon patterns in import path names.`,
         hasFix: true,
         optionsDescription: Lint.Utils.dedent`
             You may set the \`"import-sources-order"\` option to control the ordering of source
@@ -56,12 +56,38 @@ export class Rule extends Lint.Rules.AbstractRule {
             * \`"any"\`: Allow any order.
 
             You may set the \`"grouped-imports"\` option to control the grouping of source
-            imports (the \`"foo"\` in \`import {A, B, C} from "foo"\`).
+            imports (the \`"foo"\` in \`import {A, B, C} from "foo"\`).  The grouping used
+            is controlled by the \`"groups"\` option.
 
             Possible values for \`"grouped-imports"\` are:
 
             * \`false\`: Do not enforce grouping. (This is the default.)
-            * \`true\`: Group source imports by \`"bar"\`, \`"../baz"\`, \`"./foo"\`.
+            * \`true\`: Group source imports using default grouping or groups setting.
+
+            The value of \`"groups"\` is a list of group rules of the form:
+
+                [{
+                    "name": "optional rule name",
+                    "match": "regex string",
+                    "order": 10
+                }, {
+                    "name": "pkga imports",
+                    "match": "^@pkga",
+                    "order": 20
+                }]
+
+            there is also a simplified form where you only pass a list of patterns and
+            the order is given by the position in the list
+
+                ["^@pkga", "^\\.\\."]
+
+            The first rule in the list to match a given import is the group that is used.
+            If no rule in matched then the import will be put in an \`unmatched\` group
+            at the end of all groups. The groups must be ordered based upon the sequential
+            value of the \`order\` value. (ie. order 0 is first)
+
+            If no \`"groups"\` options is set, a default grouping is used of third-party,
+            parent directories and the current directory. (\`"bar"\`, \`"../baz"\`, \`"./foo"\`.)
 
             You may set the \`"named-imports-order"\` option to control the ordering of named
             imports (the \`{A, B, C}\` in \`import {A, B, C} from "foo"\`).
@@ -87,6 +113,25 @@ export class Rule extends Lint.Rules.AbstractRule {
             properties: {
                 "grouped-imports": {
                     type: "boolean",
+                },
+                groups: {
+                    type: "list",
+                    listType: {
+                        oneOf: [
+                            {
+                                type: "string",
+                            },
+                            {
+                                type: "object",
+                                properties: {
+                                    name: { type: "string" },
+                                    match: { type: "string" },
+                                    order: { type: "number" },
+                                },
+                                required: ["match", "order"],
+                            },
+                        ],
+                    },
                 },
                 "import-sources-order": {
                     type: "string",
@@ -118,8 +163,8 @@ export class Rule extends Lint.Rules.AbstractRule {
     };
     /* tslint:enable:object-literal-sort-keys */
 
-    public static IMPORT_SOURCES_NOT_GROUPED =
-        "Import sources of different groups must be sorted by: libraries, parent directories, current directory.";
+    public static IMPORT_SOURCES_NOT_GROUPED_PREFIX =
+        "Import sources of different groups must be sorted by:";
     public static IMPORT_SOURCES_UNORDERED = "Import sources within a group must be alphabetized.";
     public static NAMED_IMPORTS_UNORDERED = "Named imports must be alphabetized.";
 
@@ -164,8 +209,15 @@ enum ImportType {
 interface Options {
     groupedImports: boolean;
     importSourcesOrderTransform: Transform;
-    moduleSourcePath: Transform;
+    moduleSourceTransform: Transform;
     namedImportsOrderTransform: Transform;
+    groups: GroupOption[];
+}
+
+interface GroupOption {
+    name: string;
+    match: RegExp;
+    order: number;
 }
 
 interface JsonOptions {
@@ -173,20 +225,52 @@ interface JsonOptions {
     "import-sources-order"?: string;
     "named-imports-order"?: string;
     "module-source-path"?: string;
+    groups?: Array<JsonGroupOption | string>;
+}
+
+interface JsonGroupOption {
+    name?: string;
+    match: string;
+    order: number;
 }
 
 function parseOptions(ruleArguments: any[]): Options {
     const optionSet = (ruleArguments as JsonOptions[])[0];
+
+    const defaultGroups: JsonGroupOption[] = [
+        { name: "parent directories", match: "^\\.\\.", order: 20 },
+        { name: "current directory", match: "^\\.", order: 30 },
+        { name: "libraries", match: ".*", order: 10 },
+    ];
+
     const {
         "grouped-imports": isGrouped = false,
         "import-sources-order": sources = "case-insensitive",
         "named-imports-order": named = "case-insensitive",
         "module-source-path": path = "full",
+        groups = defaultGroups,
     } = optionSet === undefined ? {} : optionSet;
+
+    // build up list of compiled groups
+    // - handle case where "group" is just a string pattern
+    //   vs a full group object
+    const compiledGroups = groups.map((g, idx) => {
+        if (typeof g === "string") {
+            return { name: g, match: new RegExp(g), order: idx };
+        } else {
+            return {
+                match: new RegExp(g.match),
+                name: g.name !== undefined ? g.name : g.match,
+                order: g.order,
+            };
+        }
+    });
+
     return {
         groupedImports: isGrouped,
+        groups: compiledGroups,
         importSourcesOrderTransform: TRANSFORMS.get(sources)!,
-        moduleSourcePath: TRANSFORMS.get(path)!,
+        moduleSourceTransform: TRANSFORMS.get(path)!,
         namedImportsOrderTransform: TRANSFORMS.get(named)!,
     };
 }
@@ -195,7 +279,13 @@ class Walker extends Lint.AbstractWalker<Options> {
     private readonly importsBlocks = [new ImportsBlock()];
     // keep a reference to the last Fix object so when the entire block is replaced, the replacement can be added
     private lastFix: Lint.Replacement[] | undefined;
-    private nextType = ImportType.LIBRARY_IMPORT;
+
+    // group to use when no other group matches
+    private readonly defaultGroup: GroupOption = {
+        match: /.*/,
+        name: "unmatched",
+        order: Number.MAX_SAFE_INTEGER,
+    };
 
     private get currentImportsBlock(): ImportsBlock {
         return this.importsBlocks[this.importsBlocks.length - 1];
@@ -280,9 +370,15 @@ class Walker extends Lint.AbstractWalker<Options> {
     }
 
     private checkSource(source: string, node: ImportDeclaration["node"]) {
-        const currentSource = this.options.moduleSourcePath(source);
+        const matchingGroup = this.getMatchingGroup(source);
+        const currentSource = this.options.moduleSourceTransform(source);
         const previousSource = this.currentImportsBlock.getLastImportSource();
-        this.currentImportsBlock.addImportDeclaration(this.sourceFile, node, currentSource);
+        this.currentImportsBlock.addImportDeclaration(
+            this.sourceFile,
+            node,
+            currentSource,
+            matchingGroup,
+        );
 
         if (previousSource !== null && compare(currentSource, previousSource) === -1) {
             this.lastFix = [];
@@ -324,43 +420,72 @@ class Walker extends Lint.AbstractWalker<Options> {
         }
     }
 
+    /**
+     * Check all import blocks stopping at the first failure.
+     */
     private checkBlocksGrouping(): void {
-        this.importsBlocks.some(this.checkBlockGroups, this);
+        let prevBlockOrder = Number.MIN_SAFE_INTEGER;
+
+        const addFailingImportDecl = (decl: ImportDeclaration) => {
+            const groupsMsg = [...this.options.groups]
+                .sort((a, b) => a.order - b.order)
+                .map(g => g.name)
+                .join(", ");
+            const msg = `${Rule.IMPORT_SOURCES_NOT_GROUPED_PREFIX} ${groupsMsg} .`;
+
+            this.addFailureAtNode(decl.node, msg, this.getGroupOrderReplacements());
+        };
+
+        for (const block of this.importsBlocks) {
+            const importDeclarations = block.getImportDeclarations();
+            if (importDeclarations.length === 0) {
+                continue;
+            }
+
+            // check if group is out of order
+            const blockOrder = importDeclarations[0].group.order;
+            if (blockOrder <= prevBlockOrder) {
+                addFailingImportDecl(importDeclarations[0]);
+                return;
+            }
+
+            // check if all declarations have the same order value
+            for (const decl of importDeclarations) {
+                if (decl.group.order !== blockOrder) {
+                    addFailingImportDecl(decl);
+                    return;
+                }
+            }
+
+            prevBlockOrder = blockOrder;
+        }
     }
 
-    private checkBlockGroups(importsBlock: ImportsBlock): boolean {
-        const oddImportDeclaration = this.getOddImportDeclaration(importsBlock);
-        if (oddImportDeclaration !== undefined) {
-            this.addFailureAtNode(
-                oddImportDeclaration.node,
-                Rule.IMPORT_SOURCES_NOT_GROUPED,
-                this.getReplacements(),
-            );
-            return true;
+    /**
+     * Return the first import group pattern matching the given import path.
+     */
+    private getMatchingGroup(importPath: string): GroupOption {
+        // find the first matching group.
+        for (const group of this.options.groups) {
+            if (group.match.test(importPath)) {
+                return group;
+            }
         }
-        return false;
+        return this.defaultGroup;
     }
 
-    private getOddImportDeclaration(importsBlock: ImportsBlock): ImportDeclaration | undefined {
-        const importDeclarations = importsBlock.getImportDeclarations();
-        if (importDeclarations.length === 0) {
-            return undefined;
-        }
-        const type = importDeclarations[0].type;
-        if (type < this.nextType) {
-            return importDeclarations[0];
-        } else {
-            this.nextType = type;
-            return importDeclarations.find(importDeclaration => importDeclaration.type !== type);
-        }
-    }
-
-    private getReplacements(): Lint.Replacement[] {
-        const importDeclarationsList = this.importsBlocks
+    /**
+     * Build up replaces to remove all imports and replace with grouped and sorted imports.
+     */
+    private getGroupOrderReplacements(): Lint.Replacement[] {
+        // Get all import declarations for all ImportBlocks groups that are not empty
+        const groupedDeclarations = this.importsBlocks
             .map(block => block.getImportDeclarations())
             .filter(imports => imports.length > 0);
-        const allImportDeclarations = ([] as ImportDeclaration[]).concat(...importDeclarationsList);
-        const replacements = this.getReplacementsForExistingImports(importDeclarationsList);
+
+        const replacements = this.getGroupRemovalReplacements(groupedDeclarations);
+
+        const allImportDeclarations = ([] as ImportDeclaration[]).concat(...groupedDeclarations);
         const startOffset =
             allImportDeclarations.length === 0 ? 0 : allImportDeclarations[0].nodeStartOffset;
         replacements.push(
@@ -369,13 +494,16 @@ class Walker extends Lint.AbstractWalker<Options> {
         return replacements;
     }
 
-    private getReplacementsForExistingImports(
-        importDeclarationsList: ImportDeclaration[][],
+    /**
+     * Get set of replacements that delete all existing imports.
+     */
+    private getGroupRemovalReplacements(
+        groupedDeclarations: ImportDeclaration[][],
     ): Lint.Replacement[] {
-        return importDeclarationsList.map((items, index) => {
+        return groupedDeclarations.map((items, index) => {
             let start = items[0].nodeStartOffset;
             if (index > 0) {
-                const prevItems = importDeclarationsList[index - 1];
+                const prevItems = groupedDeclarations[index - 1];
                 const last = prevItems[prevItems.length - 1];
                 if (/[\r\n]+/.test(this.sourceFile.text.slice(last.nodeEndOffset, start))) {
                     // remove whitespace between blocks
@@ -386,22 +514,28 @@ class Walker extends Lint.AbstractWalker<Options> {
         });
     }
 
+    /**
+     * Get text of new set of grouped and sorted imports as text.
+     */
     private getGroupedImports(importDeclarations: ImportDeclaration[]): string {
-        return [
-            ImportType.LIBRARY_IMPORT,
-            ImportType.PARENT_DIRECTORY_IMPORT,
-            ImportType.CURRENT_DIRECTORY_IMPORT,
-        ]
-            .map(type => {
-                const imports = importDeclarations.filter(
-                    importDeclaration => importDeclaration.type === type,
-                );
+        // list of all unique order values in sorted order
+        const orderValues = importDeclarations
+            .map(decl => decl.group.order)
+            .filter((v, i, a) => a.indexOf(v) === i)
+            .sort((a, b) => a - b);
+
+        return orderValues
+            .map(curOrder => {
+                const imports = importDeclarations.filter(i => i.group.order === curOrder);
                 return getSortedImportDeclarationsAsText(imports);
             })
             .filter(text => text.length > 0)
             .join(this.getEolChar());
     }
 
+    /**
+     * Return the type of newline that should be used in the codebase.
+     */
     private getEolChar(): string {
         const lineEnd = this.sourceFile.getLineEndOfPosition(0);
         let newLine;
@@ -421,10 +555,15 @@ interface ImportDeclaration {
     nodeEndOffset: number; // end position of node within source file
     nodeStartOffset: number; // start position of node within source file
     text: string; // initialized with original import text; modified if the named imports are reordered
-    sourcePath: string;
+    sourcePath: string; // the source path in transformed format for sorting
+    group: GroupOption; // details for the group that we match
     type: ImportType;
 }
 
+/**
+ * Wrapper around a set of imports grouped together in a sequence (block)
+ * in the source code.
+ */
 class ImportsBlock {
     private importDeclarations: ImportDeclaration[] = [];
 
@@ -432,6 +571,7 @@ class ImportsBlock {
         sourceFile: ts.SourceFile,
         node: ImportDeclaration["node"],
         sourcePath: string,
+        group: GroupOption,
     ) {
         const start = this.getStartOffset(node);
         const end = this.getEndOffset(sourceFile, node);
@@ -445,6 +585,7 @@ class ImportsBlock {
         }
 
         this.importDeclarations.push({
+            group,
             node,
             nodeEndOffset: end,
             nodeStartOffset: start,
