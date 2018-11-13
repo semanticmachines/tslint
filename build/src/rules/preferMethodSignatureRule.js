@@ -1,0 +1,85 @@
+"use strict";
+/**
+ * @license
+ * Copyright 2017 Palantir Technologies, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+var __extends = (this && this.__extends) || (function () {
+    var extendStatics = Object.setPrototypeOf ||
+        ({ __proto__: [] } instanceof Array && function (d, b) { d.__proto__ = b; }) ||
+        function (d, b) { for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p]; };
+    return function (d, b) {
+        extendStatics(d, b);
+        function __() { this.constructor = d; }
+        d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+var tsutils_1 = require("tsutils");
+var ts = require("typescript");
+var Lint = require("../index");
+var Rule = /** @class */ (function (_super) {
+    __extends(Rule, _super);
+    function Rule() {
+        return _super !== null && _super.apply(this, arguments) || this;
+    }
+    Rule.METH_SIGN_STRING = function (ps) {
+        var type = ps.type, questionToken = ps.questionToken;
+        var result = ps.name.getText();
+        if (questionToken !== undefined) {
+            result += "?";
+        }
+        if (type !== undefined && tsutils_1.isFunctionTypeNode(type) && type.type !== undefined) {
+            if (type.typeParameters !== undefined) {
+                var tps = type.typeParameters.map(function (tp) { return tp.getText(); }).join(", ");
+                result += "<" + tps + ">";
+            }
+            var args = type.parameters.map(function (v) { return v.getText(); }).join(", ");
+            result += "(" + args + "): " + type.type.getText() + ";";
+        }
+        return result;
+    };
+    Rule.prototype.apply = function (sourceFile) {
+        return this.applyWithFunction(sourceFile, walk);
+    };
+    /* tslint:disable:object-literal-sort-keys */
+    Rule.metadata = {
+        ruleName: "prefer-method-signature",
+        description: "Prefer `foo(): void` over `foo: () => void` in interfaces and types.",
+        hasFix: true,
+        optionsDescription: "Not configurable.",
+        options: null,
+        optionExamples: [true],
+        type: "style",
+        typescriptOnly: false,
+    };
+    /* tslint:enable:object-literal-sort-keys */
+    Rule.FAILURE_STRING = "Use a method signature instead of a property signature of function type.";
+    return Rule;
+}(Lint.Rules.AbstractRule));
+exports.Rule = Rule;
+function walk(ctx) {
+    return ts.forEachChild(ctx.sourceFile, function cb(node) {
+        if (tsutils_1.isPropertySignature(node)) {
+            var type = node.type;
+            if (type !== undefined && tsutils_1.isFunctionTypeNode(type)) {
+                ctx.addFailureAtNode(node.name, Rule.FAILURE_STRING, type.type === undefined
+                    ? undefined
+                    : [Lint.Replacement.replaceNode(node, Rule.METH_SIGN_STRING(node))]);
+            }
+        }
+        return ts.forEachChild(node, cb);
+    });
+}
+//# sourceMappingURL=preferMethodSignatureRule.js.map
